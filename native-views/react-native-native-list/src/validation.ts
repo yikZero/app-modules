@@ -1252,6 +1252,108 @@ function assertButtonGroup(
   });
 }
 
+const MAX_TITLE_SEGMENTS = 4;
+const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i;
+
+function assertTitleSegments(value: unknown, path: string): void {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_TITLE_SEGMENTS
+  )
+    fail(path, `must hold 1...${MAX_TITLE_SEGMENTS} segments`);
+  let shrinking = 0;
+  value.forEach((item: unknown, index) => {
+    const segmentPath = `${path}[${index}]`;
+    const segment = protocolObject(item, segmentPath);
+    assertUnknownKeys(
+      segment,
+      ['text', 'tone', 'fontWeight', 'shrink', 'maxWidthRatio'],
+      segmentPath,
+      'title segment key'
+    );
+    const { text, tone, fontWeight, shrink, maxWidthRatio } = segment;
+    if (typeof text !== 'string' || !text.trim())
+      fail(`${segmentPath}.text`, 'must be non-blank');
+    assertText(text, `${segmentPath}.text`);
+    if (tone !== undefined && tone !== 'primary' && tone !== 'secondary')
+      fail(`${segmentPath}.tone`, 'must be primary or secondary');
+    if (
+      fontWeight !== undefined &&
+      fontWeight !== 'regular' &&
+      fontWeight !== 'medium'
+    )
+      fail(`${segmentPath}.fontWeight`, 'must be regular or medium');
+    if (shrink !== undefined && typeof shrink !== 'boolean')
+      fail(`${segmentPath}.shrink`, 'must be a boolean');
+    if (shrink) shrinking += 1;
+    if (
+      maxWidthRatio !== undefined &&
+      (typeof maxWidthRatio !== 'number' ||
+        !Number.isFinite(maxWidthRatio) ||
+        maxWidthRatio <= 0 ||
+        maxWidthRatio > 1)
+    )
+      fail(`${segmentPath}.maxWidthRatio`, 'must be finite within (0, 1]');
+  });
+  if (shrinking > 1) fail(path, 'allows at most one shrinking segment');
+}
+
+function assertTitleLeadingIcon(value: unknown, path: string): void {
+  const icon = protocolObject(value, path);
+  assertUnknownKeys(
+    icon,
+    ['name', 'tintColor', 'accessibilityLabel'],
+    path,
+    'title leading icon key'
+  );
+  const { name, tintColor, accessibilityLabel } = icon;
+  if (typeof name !== 'string' || !name.trim())
+    fail(`${path}.name`, 'must be non-blank');
+  if (
+    tintColor !== undefined &&
+    (typeof tintColor !== 'string' || !HEX_COLOR_PATTERN.test(tintColor))
+  )
+    fail(`${path}.tintColor`, 'must be #RRGGBB or #RRGGBBAA');
+  if (
+    accessibilityLabel !== undefined &&
+    typeof accessibilityLabel !== 'string'
+  )
+    fail(`${path}.accessibilityLabel`, 'must be a string');
+}
+
+function assertIdentityTitleRuns(
+  row: Pick<
+    IdentityRow,
+    'titleSegments' | 'titleLeadingIcon' | 'titleMatch' | 'presentation'
+  >,
+  path: string
+): void {
+  if (row.titleSegments !== undefined) {
+    assertTitleSegments(row.titleSegments, `${path}.titleSegments`);
+    // titleMatch ranges index `title`, which the runs replace on screen.
+    if (row.titleMatch?.length)
+      fail(`${path}.titleMatch`, 'cannot be combined with titleSegments');
+    if (row.presentation === 'walletSidebar')
+      fail(`${path}.titleSegments`, 'is not supported with walletSidebar');
+  }
+  if (row.titleLeadingIcon !== undefined) {
+    assertTitleLeadingIcon(row.titleLeadingIcon, `${path}.titleLeadingIcon`);
+    if (row.presentation === 'walletSidebar')
+      fail(`${path}.titleLeadingIcon`, 'is not supported with walletSidebar');
+  }
+}
+
+/** Production keeps decorative title runs only when they pass the rules. */
+function passesTitleRunRules(check: () => void): boolean {
+  try {
+    check();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function assertIdentityExtras(
   row: Pick<
     IdentityRow,
@@ -1742,6 +1844,7 @@ function assertRow(
           );
       });
       assertIdentityExtras(row, path);
+      assertIdentityTitleRuns(row, path);
       assertText(row.subtitle, `${path}.subtitle`);
       // OneKey patch: selector text segments truncate independently.
       row.subtitleSegments?.forEach((segment, segmentIndex) => {
@@ -2324,6 +2427,8 @@ const ROW_FIELDS: Readonly<Record<string, readonly string[]>> = {
     'titleIcon',
     'secondaryTitleIcon',
     'titleImage',
+    'titleSegments',
+    'titleLeadingIcon',
     'subtitle',
     'tertiary',
     'tertiaryTone',
@@ -2500,6 +2605,8 @@ const PATCH_FIELDS: Readonly<Record<string, readonly string[]>> = {
     'titleIcon',
     'secondaryTitleIcon',
     'titleImage',
+    'titleSegments',
+    'titleLeadingIcon',
     'subtitle',
     'tertiary',
     'tertiaryTone',
@@ -2630,6 +2737,7 @@ function protocolKey(value: unknown, path: string): void {
 const PROTOCOL_ARRAY_FIELDS = new Set([
   'columns',
   'titleSuffixes',
+  'titleSegments',
   'cells',
   'points',
   'images',
@@ -2871,7 +2979,10 @@ function assertRowProtocol(row: RowModel, path: string): void {
   if (row.height !== undefined && row.height < 0)
     fail(`${path}.height`, 'must be non-negative');
   if (row.type === 'identity') {
-    if (isDevelopment()) assertIdentityExtras(row, path);
+    if (isDevelopment()) {
+      assertIdentityExtras(row, path);
+      assertIdentityTitleRuns(row, path);
+    }
     if (row.titleSuffixes !== undefined && !Array.isArray(row.titleSuffixes))
       fail(`${path}.titleSuffixes`, 'must be an array');
     row.titleSuffixes?.forEach((suffix, index) => {
@@ -3463,6 +3574,14 @@ const NESTED_DECORATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
 
 function sanitizeDecoration(value: unknown, field: string): unknown {
   if (value === undefined || value === null) return undefined;
+  if (field === 'titleSegments')
+    return passesTitleRunRules(() => assertTitleSegments(value, field))
+      ? value
+      : undefined;
+  if (field === 'titleLeadingIcon')
+    return passesTitleRunRules(() => assertTitleLeadingIcon(value, field))
+      ? value
+      : undefined;
   if (
     !Array.isArray(value) &&
     [
